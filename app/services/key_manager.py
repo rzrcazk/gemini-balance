@@ -9,82 +9,69 @@ logger = get_key_manager_logger()
 
 
 class KeyManager:
-    def __init__(self, api_keys: list):
-        self.api_keys = api_keys
-        self.key_cycle = cycle(api_keys)
-        self.key_cycle_lock = asyncio.Lock()
-        self.failure_count_lock = asyncio.Lock()
-        self.key_failure_counts: Dict[str, int] = {key: 0 for key in api_keys}
-        self.MAX_FAILURES = settings.MAX_FAILURES
-        self.paid_key = settings.PAID_KEY
+    def __init__(self, key_config: dict = None):
+        if key_config is None:
+            key_config = settings.KEY_CONFIG
 
-    async def get_paid_key(self) -> str:
-        return self.paid_key
-        
-    async def get_next_key(self) -> str:
-        """获取下一个API key"""
-        async with self.key_cycle_lock:
-            return next(self.key_cycle)
+        self.key_groups = {}  # 存储不同模型组的密钥和配置
+        self.key_statuses = {}  # 存储密钥的状态（是否有效、失败次数）
+        self.lock = asyncio.Lock()  # 异步锁，用于保护密钥状态的更新
 
-    async def is_key_valid(self, key: str) -> bool:
-        """检查key是否有效"""
-        async with self.failure_count_lock:
-            return self.key_failure_counts[key] < self.MAX_FAILURES
+        # 初始化密钥组和状态
+        for group_name, conf in key_config.items():
+            self.key_groups[group_name] = {
+                "keys": cycle(conf["keys"]),  # 使用 cycle 创建无限循环的密钥迭代器
+                "paid_model": conf.get("paid_model"),
+                "prefix": conf.get("prefix", "")  # 增加 prefix 支持
+            }
+            self.key_statuses[group_name] = {}
+            for key in conf["keys"]:
+                self.key_statuses[group_name][key] = {"valid": True, "failure_count": 0}
 
-    async def reset_failure_counts(self):
-        """重置所有key的失败计数"""
-        async with self.failure_count_lock:
-            for key in self.key_failure_counts:
-                self.key_failure_counts[key] = 0
+    def get_next_key(self, group_name: str):
+        """获取指定模型组的下一个密钥"""
+        if group_name not in self.key_groups:
+            raise ValueError(f"Invalid key group name: {group_name}")
 
-    async def get_next_working_key(self) -> str:
-        """获取下一可用的API key"""
-        initial_key = await self.get_next_key()
-        current_key = initial_key
+        return next(self.key_groups[group_name]["keys"])
 
-        while True:
-            if await self.is_key_valid(current_key):
-                return current_key
+    def is_key_valid(self, group_name: str, key: str):
+        """检查密钥是否有效"""
+        return self.key_statuses[group_name][key]["valid"]
 
-            current_key = await self.get_next_key()
-            if current_key == initial_key:
-                # await self.reset_failure_counts() 取消重置
-                return current_key
+    def get_next_working_key(self, group_name: str):
+        """获取指定模型组的下一个有效密钥"""
+        async with self.lock:  # 使用锁保护密钥状态
+            for _ in range(len(self.key_statuses[group_name])):  # 遍历所有密钥，最多循环一轮
+                key = self.get_next_key(group_name)
+                if self.is_key_valid(group_name, key):
+                    return key
+            return None  # 如果没有找到有效密钥，返回 None
 
-    async def handle_api_failure(self, api_key: str) -> str:
-        """处理API调用失败"""
-        async with self.failure_count_lock:
-            self.key_failure_counts[api_key] += 1
-            if self.key_failure_counts[api_key] >= self.MAX_FAILURES:
-                logger.warning(
-                    f"API key {api_key} has failed {self.MAX_FAILURES} times"
-                )
+    def handle_api_failure(self, group_name: str, key: str):
+        """处理 API 密钥失败"""
+        async with self.lock:
+            self.key_statuses[group_name][key]["failure_count"] += 1
+            # 如果失败次数超过阈值，标记为无效
+            if self.key_statuses[group_name][key]["failure_count"] >= settings.MAX_FAILED_ATTEMPTS:
+                self.key_statuses[group_name][key]["valid"] = False
 
-        return await self.get_next_working_key()
+    def get_paid_key(self, group_name: str):
+        """获取指定模型组的付费密钥（如果有）"""
+        return self.key_groups[group_name].get("paid_model")
 
-    def get_fail_count(self, key: str) -> int:
-        """获取指定密钥的失败次数"""
-        return self.key_failure_counts.get(key, 0)
+    def get_keys_by_status(self, group_name: str):
+        """获取指定模型组的密钥状态"""
+        return self.key_statuses[group_name]
 
-    async def get_keys_by_status(self) -> dict:
-        """获取分类后的API key列表，包括失败次数"""
-        valid_keys = {}
-        invalid_keys = {}
-        
-        async with self.failure_count_lock:
-            for key in self.api_keys:
-                fail_count = self.key_failure_counts[key]
-                if fail_count < self.MAX_FAILURES:
-                    valid_keys[key] = fail_count
-                else:
-                    invalid_keys[key] = fail_count
-        
-        return {
-            "valid_keys": valid_keys,
-            "invalid_keys": invalid_keys
-        }
-        
-        
+    def get_key_group_name(self, model_name: str) -> str:
+        """根据模型名称获取 key group"""
+        for group_name, config in self.key_groups.items():
+            if config["prefix"] and model_name.startswith(config["prefix"]):
+                return group_name
+        return "gemini"  # 默认使用 gemini
+
+
 _singleton_instance = None
 _singleton_lock = asyncio.Lock()
 
