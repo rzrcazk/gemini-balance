@@ -7,15 +7,17 @@ from app.core.logger import get_main_logger
 from app.core.security import verify_auth_token
 from app.services.key_manager import get_key_manager_instance
 from app.core.config import settings
-
-from app.api import gemini_routes, openai_routes
+from app.api import gemini_routes, openai_routes, claude_routes
 import uvicorn
 
 
 # 配置日志
 logger = get_main_logger()
 
-app = FastAPI()
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+)
 
 # 配置Jinja2模板
 templates = Jinja2Templates(directory="app/templates")
@@ -71,8 +73,9 @@ app.add_middleware(
 )
 
 # 包含所有路由
-app.include_router(openai_routes.router)
-app.include_router(gemini_routes.router)
+app.include_router(openai_routes.router, prefix="/v1", tags=["OpenAI"])
+app.include_router(gemini_routes.router, prefix="/v1", tags=["Gemini"])
+app.include_router(claude_routes.router, prefix="/v1", tags=["Claude"])
 app.include_router(gemini_routes.router_v1beta)
 
 

@@ -7,17 +7,17 @@ import json
 class ClaudeChatService:
     def __init__(self, key_manager: KeyManager):
         self.key_manager = key_manager
+        self.base_url = config.settings.CLAUDE_BASE_URL
 
-    async def create_chat_completion(self, request: ChatRequest, key_group_name: str):
-        api_key = self.key_manager.get_next_working_key(key_group_name)
+    async def create_chat_completion(self, request: ChatRequest, key_group_name: str = "claude"):
+        api_key = await self.key_manager.get_next_working_key(key_group_name)
         if api_key is None:
             raise Exception(f"No valid {key_group_name} API key found")
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",  # 只需要这两个请求头
+            "Authorization": f"Bearer {api_key}",  # 修改请求头
         }
-
         data = {
             "model": request.model,
             "messages": [message.dict() for message in request.messages],
@@ -25,21 +25,21 @@ class ClaudeChatService:
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
             "top_p": request.top_p,
+            # 其他参数，如果你的代理支持
         }
 
         try:
             if request.stream:
                 async def generate_claude_stream():
                     async with httpx.AsyncClient() as client:
-                        async with client.stream("POST", config.CLAUDE_BASE_URL + "/v1/chat/completions", headers=headers,
-                                                  json=data, timeout=600) as response:
+                        async with client.stream("POST", f"{self.base_url}/v1/chat/completions", headers=headers,
+                                                  json=data, timeout=config.settings.HTTP_TIMEOUT) as response: # 使用配置的超时
                             async for chunk in response.aiter_bytes():
                                 # 假设你的服务返回的是类似 OpenAI 的 JSON 格式
                                 for line in chunk.split(b"\n"):
                                     if not line.strip():
                                         continue
                                     if b"data:" in line:
-
                                         try:
                                             line_str = line.decode("utf-8").replace("data:", "").strip()
                                             data_json = json.loads(line_str)
@@ -69,14 +69,15 @@ class ClaudeChatService:
                                                 }
                                                 yield f"data: {json.dumps(openai_chunk)}\n\n"
 
-                                        except (json.JSONDecodeError, KeyError):
+                                        except (json.JSONDecodeError, KeyError) as e:
                                             # 处理 JSON 解析错误或字段缺失的情况
+                                            print(f"error: {e}")
                                             continue
                     yield b"data: [DONE]\n\n"
                 return generate_claude_stream()
             else:
                 async with httpx.AsyncClient() as client:
-                    response = await client.post(config.CLAUDE_BASE_URL + "/v1/chat/completions", headers=headers, json=data, timeout=600)
+                    response = await client.post(f"{self.base_url}/v1/chat/completions", headers=headers, json=data, timeout=config.settings.HTTP_TIMEOUT)
                     response.raise_for_status()
                     response_json = response.json()
                     # 假设你的服务返回的也是 OpenAI 格式的响应
@@ -99,8 +100,32 @@ class ClaudeChatService:
                         usage=response_json.get("usage", {}),
                     )
         except Exception as e:
-            self.key_manager.handle_api_failure(key_group_name, api_key)
+            await self.key_manager.handle_api_failure(key_group_name, api_key)
             raise
+
+    async def list_models(self, key_group_name: str = "claude"):
+        """
+        获取模型列表。由于你的代理只支持 /v1/models，这里我们简单地返回一个模拟的模型列表。
+        """
+        api_key = await self.key_manager.get_next_working_key(key_group_name)
+        if api_key is None:
+            raise Exception(f"No valid {key_group_name} API key found")
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",  # 修改请求头
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{self.base_url}/v1/models", headers=headers, timeout=config.settings.HTTP_TIMEOUT)
+            response.raise_for_status()
+            return response.json()
+        # return {
+        #     "data": [
+        #         {"id": "claude-3.5-sonnet", "object": "model", "created": 1678888888, "owned_by": "zhucn"},
+        #         {"id": "claude-3-opus", "object": "model", "created": 1678888888, "owned_by": "zhucn"},
+        #     ],
+        #     "object": "list"
+        # }
 
     def _convert_messages(self, messages):
         # 将 OpenAI 格式的消息转换为 Claude 格式
