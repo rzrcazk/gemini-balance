@@ -39,7 +39,7 @@ class KeyManager:
         """检查密钥是否有效"""
         return self.key_statuses[group_name][key]["valid"]
 
-    def get_next_working_key(self, group_name: str):
+    async def get_next_working_key(self, group_name: str):
         """获取指定模型组的下一个有效密钥"""
         async with self.lock:  # 使用锁保护密钥状态
             for _ in range(len(self.key_statuses[group_name])):  # 遍历所有密钥，最多循环一轮
@@ -48,7 +48,7 @@ class KeyManager:
                     return key
             return None  # 如果没有找到有效密钥，返回 None
 
-    def handle_api_failure(self, group_name: str, key: str):
+    async def handle_api_failure(self, group_name: str, key: str):
         """处理 API 密钥失败"""
         async with self.lock:
             self.key_statuses[group_name][key]["failure_count"] += 1
